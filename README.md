@@ -347,3 +347,7 @@ the `@SecurityScope [schema-name] [scope-code] [scope-description]` comment.
 - [yvasiyarov/swagger](https://github.com/yvasiyarov/swagger)
 - [uudashr/go-module](https://github.com/uudashr/go-module)
 - [mikunalpha/goas](https://github.com/mikunalpha/goas)
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/image?repos=parvez3019/go-swagger3&type=date&legend=top-left)](https://www.star-history.com/?repos=parvez3019%2Fgo-swagger3&type=date&legend=top-left)
