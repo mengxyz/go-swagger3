@@ -87,7 +87,7 @@ func (p *parser) parseCustomTypeSchemaObject(pkgPath string, pkgName string, typ
 	} else if astStructType, ok := typeSpec.Type.(*ast.StructType); ok {
 		schemaObject.Type = "object"
 		if astStructType.Fields != nil {
-			p.parseSchemaPropertiesFromStructFields(pkgPath, pkgName, &schemaObject, astStructType.Fields.List)
+			p.parseSchemaPropertiesFromStructFields(pkgPath, pkgName, &schemaObject, astStructType.Fields.List, nil)
 		}
 		typeNameParts := strings.Split(typeName, ".")
 		if len(typeNameParts) > 1 {
@@ -100,19 +100,32 @@ func (p *parser) parseCustomTypeSchemaObject(pkgPath string, pkgName string, typ
 			}
 		}
 	} else if astArrayType, ok := typeSpec.Type.(*ast.ArrayType); ok {
-		schemaObject.Type = "array"
-		schemaObject.Items = &SchemaObject{}
-		typeAsString := p.getTypeAsString(astArrayType.Elt)
-		typeAsString = strings.TrimLeft(typeAsString, "*")
-		if !utils.IsBasicGoType(typeAsString) {
-			schemaItemsSchemeaObjectID, err := p.RegisterType(pkgPath, pkgName, typeAsString)
-			if err != nil {
-				p.Debugf("ParseSchemaObject parse array items err: %s", err.Error())
+		elemTypeStr := p.getTypeAsString(astArrayType.Elt)
+		elemTypeStr = strings.TrimLeft(elemTypeStr, "*")
+		// Byte arrays and byte slices (e.g. uuid.UUID = [16]byte, []byte) are
+		// represented as strings in OpenAPI rather than arrays.
+		if elemTypeStr == "byte" || elemTypeStr == "uint8" {
+			schemaObject.Type = "string"
+			localTypeName := typeNameParts[len(typeNameParts)-1]
+			if strings.EqualFold(localTypeName, "uuid") {
+				schemaObject.Format = "uuid"
 			} else {
-				schemaObject.Items.Ref = utils.AddSchemaRefLinkPrefix(schemaItemsSchemeaObjectID)
+				schemaObject.Format = "binary"
 			}
-		} else if utils.IsGoTypeOASType(typeAsString) {
-			schemaObject.Items.Type = utils.GoTypesOASTypes[typeAsString]
+		} else {
+			schemaObject.Type = "array"
+			schemaObject.Items = &SchemaObject{}
+			typeAsString := elemTypeStr
+			if !utils.IsBasicGoType(typeAsString) {
+				schemaItemsSchemeaObjectID, err := p.RegisterType(pkgPath, pkgName, typeAsString)
+				if err != nil {
+					p.Debugf("ParseSchemaObject parse array items err: %s", err.Error())
+				} else {
+					schemaObject.Items.Ref = utils.AddSchemaRefLinkPrefix(schemaItemsSchemeaObjectID)
+				}
+			} else if utils.IsGoTypeOASType(typeAsString) {
+				schemaObject.Items.Type = utils.GoTypesOASTypes[typeAsString]
+			}
 		}
 	} else if astMapType, ok := typeSpec.Type.(*ast.MapType); ok {
 		schemaObject.Type = "object"
@@ -147,7 +160,31 @@ func (p *parser) getTypeSpec(pkgName, typeName string) (*ast.TypeSpec, bool) {
 	return astTypeSpec, true
 }
 
-func (p *parser) parseSchemaPropertiesFromStructFields(pkgPath, pkgName string, structSchema *SchemaObject, astFields []*ast.Field) {
+// substituteTypeParams replaces a type string using a type parameter mapping.
+// It handles direct types, slices ([]T), and maps (map[]T).
+func substituteTypeParams(typeStr string, typeParams map[string]string) string {
+	if len(typeParams) == 0 {
+		return typeStr
+	}
+	if sub, ok := typeParams[typeStr]; ok {
+		return sub
+	}
+	if strings.HasPrefix(typeStr, "[]") {
+		inner := typeStr[2:]
+		if sub, ok := typeParams[inner]; ok {
+			return "[]" + sub
+		}
+	}
+	if strings.HasPrefix(typeStr, "map[]") {
+		inner := typeStr[5:]
+		if sub, ok := typeParams[inner]; ok {
+			return "map[]" + sub
+		}
+	}
+	return typeStr
+}
+
+func (p *parser) parseSchemaPropertiesFromStructFields(pkgPath, pkgName string, structSchema *SchemaObject, astFields []*ast.Field, typeParams map[string]string) {
 	if astFields == nil {
 		return
 	}
@@ -173,6 +210,7 @@ astFieldsLoop:
 		fieldSchema := &SchemaObject{}
 		typeAsString := p.getTypeAsString(astField.Type)
 		typeAsString = strings.TrimLeft(typeAsString, "*")
+		typeAsString = substituteTypeParams(typeAsString, typeParams)
 		if strings.HasPrefix(typeAsString, "[]") {
 			fieldSchema, err = p.ParseSchemaObject(pkgPath, pkgName, typeAsString)
 			if err != nil {
@@ -203,13 +241,10 @@ astFieldsLoop:
 				p.Debug("parseSchemaPropertiesFromStructFields err:", err)
 			} else {
 				fieldSchema.ID = fieldSchemaSchemeaObjectID
-				schema, ok := p.KnownIDSchema[fieldSchemaSchemeaObjectID]
-				if ok {
-					fieldSchema.Type = schema.Type
-					if schema.Items != nil {
-						fieldSchema.Items = schema.Items
-					}
-				}
+				// Do not copy Type/Items from the referenced schema onto the
+				// field – OpenAPI $ref replaces the entire schema inline and
+				// mixing $ref with sibling keywords produces invalid output
+				// (e.g. type:array alongside $ref for uuid.UUID).
 				fieldSchema.Ref = utils.AddSchemaRefLinkPrefix(fieldSchemaSchemeaObjectID)
 			}
 		} else if utils.IsGoTypeOASType(typeAsString) {
@@ -295,6 +330,7 @@ astFieldsLoop:
 		fieldSchema := &SchemaObject{}
 		typeAsString := p.getTypeAsString(astField.Type)
 		typeAsString = strings.TrimLeft(typeAsString, "*")
+		typeAsString = substituteTypeParams(typeAsString, typeParams)
 		if strings.HasPrefix(typeAsString, "[]") {
 			fieldSchema, err = p.ParseSchemaObject(pkgPath, pkgName, typeAsString)
 			if err != nil {
@@ -325,13 +361,6 @@ astFieldsLoop:
 				p.Debug("parseSchemaPropertiesFromStructFields err:", err)
 			} else {
 				fieldSchema.ID = fieldSchemaSchemeaObjectID
-				schema, ok := p.KnownIDSchema[fieldSchemaSchemeaObjectID]
-				if ok {
-					fieldSchema.Type = schema.Type
-					if schema.Items != nil {
-						fieldSchema.Items = schema.Items
-					}
-				}
 				fieldSchema.Ref = utils.AddSchemaRefLinkPrefix(fieldSchemaSchemeaObjectID)
 			}
 		} else if utils.IsGoTypeOASType(typeAsString) {
@@ -371,6 +400,144 @@ astFieldsLoop:
 			continue
 		}
 	}
+}
+
+// parseGenericTypeSchemaObject handles a generic type instantiation such as
+// "response.ResponseData[model.CreditResponse]". It looks up the base struct's AST,
+// substitutes the type parameters with the provided type arguments, and returns a
+// fully-expanded SchemaObject registered under a unique schema ID.
+func (p *parser) parseGenericTypeSchemaObject(pkgPath, pkgName, baseTypeName string, typeArgs []string) (*SchemaObject, error) {
+	schemaID := genGenericSchemaID(pkgName, baseTypeName, typeArgs, p.SchemaWithoutPkg)
+
+	// Return cached result if we already expanded this instantiation.
+	if existing, ok := p.KnownIDSchema[schemaID]; ok {
+		return existing, nil
+	}
+
+	// Locate the base TypeSpec.
+	var baseTypeSpec *ast.TypeSpec
+	var basePkgPath, basePkgName string
+
+	parts := strings.Split(baseTypeName, ".")
+	if len(parts) == 1 {
+		basePkgPath = pkgPath
+		basePkgName = pkgName
+		spec, ok := p.getTypeSpec(pkgName, baseTypeName)
+		if !ok {
+			p.Debugf("parseGenericTypeSchemaObject: cannot find type %s in pkg %s", baseTypeName, pkgName)
+			return &SchemaObject{}, nil
+		}
+		baseTypeSpec = spec
+	} else {
+		guessPkgName := strings.Join(parts[:len(parts)-1], "/")
+		guessTypeName := parts[len(parts)-1]
+		for i := range p.KnownPkgs {
+			if guessPkgName == p.KnownPkgs[i].Name {
+				basePkgPath = p.KnownPkgs[i].Path
+				break
+			}
+		}
+		basePkgName = guessPkgName
+		spec, ok := p.getTypeSpec(guessPkgName, guessTypeName)
+		if !ok {
+			// Try package aliases.
+			aliases := p.PkgNameImportedPkgAlias[pkgName][guessPkgName]
+			for _, alias := range aliases {
+				spec, ok = p.getTypeSpec(alias, guessTypeName)
+				if ok {
+					basePkgName = alias
+					for i := range p.KnownPkgs {
+						if alias == p.KnownPkgs[i].Name {
+							basePkgPath = p.KnownPkgs[i].Path
+							break
+						}
+					}
+					break
+				}
+			}
+			if !ok {
+				p.Debugf("parseGenericTypeSchemaObject: cannot find type %s in pkg %s", guessTypeName, guessPkgName)
+				return &SchemaObject{}, nil
+			}
+		}
+		baseTypeSpec = spec
+	}
+
+	astStructType, ok := baseTypeSpec.Type.(*ast.StructType)
+	if !ok {
+		p.Debugf("parseGenericTypeSchemaObject: base type %s is not a struct", baseTypeName)
+		return &SchemaObject{}, nil
+	}
+
+	// Collect type parameter names (Go 1.18+).
+	var typeParamNames []string
+	if baseTypeSpec.TypeParams != nil {
+		for _, field := range baseTypeSpec.TypeParams.List {
+			for _, name := range field.Names {
+				typeParamNames = append(typeParamNames, name.Name)
+			}
+		}
+	}
+
+	// Pre-register each type argument from the caller's package context so that
+	// when the substituted type name is used inside the base struct's package, it
+	// can be resolved via KnownIDSchema without needing a self-import alias.
+	resolvedTypeArgs := make([]string, len(typeArgs))
+	for i, typeArg := range typeArgs {
+		if utils.IsBasicGoType(typeArg) {
+			resolvedTypeArgs[i] = typeArg
+		} else {
+			id, err := p.RegisterType(pkgPath, pkgName, typeArg)
+			if err == nil && id != "" {
+				resolvedTypeArgs[i] = id
+			} else {
+				resolvedTypeArgs[i] = typeArg
+			}
+		}
+	}
+
+	// Build type-param → resolved-type mapping.
+	typeParamMap := make(map[string]string, len(typeParamNames))
+	for i, paramName := range typeParamNames {
+		if i < len(resolvedTypeArgs) {
+			typeParamMap[paramName] = resolvedTypeArgs[i]
+		}
+	}
+
+	// Pre-register to break potential cycles.
+	schemaObject := &SchemaObject{
+		ID:      schemaID,
+		PkgName: basePkgName,
+		Type:    "object",
+	}
+	p.KnownIDSchema[schemaID] = schemaObject
+
+	if astStructType.Fields != nil {
+		p.parseSchemaPropertiesFromStructFields(basePkgPath, basePkgName, schemaObject, astStructType.Fields.List, typeParamMap)
+	}
+
+	p.OpenAPI.Components.Schemas[utils.ReplaceBackslash(schemaID)] = schemaObject
+	return schemaObject, nil
+}
+
+// genGenericSchemaID produces a stable schema ID for a generic instantiation,
+// e.g. "response.ResponseData" + ["model.CreditResponse"] → "response.ResponseData[CreditResponse]".
+func genGenericSchemaID(pkgName, baseTypeName string, typeArgs []string, withoutPkg bool) string {
+	typeNameParts := strings.Split(baseTypeName, ".")
+	typeName := typeNameParts[len(typeNameParts)-1]
+
+	argNames := make([]string, len(typeArgs))
+	for i, arg := range typeArgs {
+		argParts := strings.Split(arg, ".")
+		argNames[i] = argParts[len(argParts)-1]
+	}
+	suffix := "[" + strings.Join(argNames, ",") + "]"
+
+	if withoutPkg {
+		return typeName + suffix
+	}
+	pkgName = utils.ReplaceBackslash(pkgName)
+	return strings.Join(append(strings.Split(pkgName, "/"), typeName+suffix), ".")
 }
 
 func (p *parser) addType(astFieldTag reflect.StructTag, fieldSchema *SchemaObject) {

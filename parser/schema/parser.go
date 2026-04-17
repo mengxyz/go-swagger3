@@ -11,6 +11,50 @@ import (
 	"strings"
 )
 
+// parseGenericTypeName detects a generic instantiation like "response.ResponseData[model.CreditResponse]".
+// Returns base type, type arguments, and true when the type is generic.
+func parseGenericTypeName(typeName string) (string, []string, bool) {
+	idx := strings.Index(typeName, "[")
+	if idx <= 0 {
+		return "", nil, false
+	}
+	lastIdx := strings.LastIndex(typeName, "]")
+	if lastIdx != len(typeName)-1 {
+		return "", nil, false
+	}
+	baseType := typeName[:idx]
+	typeArgsStr := typeName[idx+1 : lastIdx]
+	if typeArgsStr == "" {
+		return "", nil, false // empty brackets are handled as arrays elsewhere
+	}
+	typeArgs := splitTypeArgs(typeArgsStr)
+	return baseType, typeArgs, true
+}
+
+// splitTypeArgs splits comma-separated type arguments, respecting nested brackets.
+func splitTypeArgs(s string) []string {
+	var args []string
+	depth := 0
+	start := 0
+	for i, c := range s {
+		switch c {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if start < len(s) {
+		args = append(args, strings.TrimSpace(s[start:]))
+	}
+	return args
+}
+
 type Parser interface {
 	GetPkgAst(pkgPath string) (map[string]*ast.Package, error)
 	RegisterType(pkgPath, pkgName, typeName string) (string, error)
@@ -74,6 +118,11 @@ func (p *parser) ParseSchemaObject(pkgPath, pkgName, typeName string) (*SchemaOb
 	schemaObject, err, isBasicType := p.parseBasicTypeSchemaObject(pkgPath, pkgName, typeName)
 	if isBasicType {
 		return schemaObject, err
+	}
+
+	// Handle generic type instantiation like "response.ResponseData[model.CreditResponse]"
+	if baseType, typeArgs, ok := parseGenericTypeName(typeName); ok {
+		return p.parseGenericTypeSchemaObject(pkgPath, pkgName, baseType, typeArgs)
 	}
 
 	return p.parseCustomTypeSchemaObject(pkgPath, pkgName, typeName)
